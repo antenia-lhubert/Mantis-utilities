@@ -4,6 +4,8 @@
 // @version      0.3
 // @description  Liste d'utilitaires pour améliorer l'utilisation de mantis
 // @author       lhubert
+// @downloadURL  https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
+// @updateURL    https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
 // @match        https://bug.leaderinfo.com/mantisbt/view.php*
 // @icon         https://bug.leaderinfo.com/mantisbt/images/favicon.ico
 // @grant        GM_setValue
