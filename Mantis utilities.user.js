@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mantis utilities
 // @namespace    https://bug.leaderinfo.com/mantisbt
-// @version      0.4
+// @version      2025-06-10
 // @description  Liste d'utilitaires pour améliorer l'utilisation de mantis
 // @author       lhubert
 // @downloadURL  https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
