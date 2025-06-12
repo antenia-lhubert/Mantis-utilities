@@ -437,8 +437,8 @@
 
         cbElement.appendChild(document.createElement('br'));
 
-        const contentElement = document.createTextNode(`${noteText}`);
-        contentElement.innerHTML = contentElement.textContent.replaceAll(/\n/g, '<br/>');
+        const contentElement = document.createElement('div');
+        contentElement.innerHTML = noteText.replaceAll(/\n/g, '<br/>');
 
         cbElement.appendChild(contentElement);
 
