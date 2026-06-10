@@ -1,12 +1,14 @@
 // ==UserScript==
 // @name         Mantis utilities
 // @namespace    https://bug.leaderinfo.com/mantisbt
-// @version      2025-06-12
+// @version      2026-06-10
 // @description  Liste d'utilitaires pour améliorer l'utilisation de mantis
 // @author       lhubert
 // @downloadURL  https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
 // @updateURL    https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
 // @match        https://bug.leaderinfo.com/mantisbt/view.php*
+// @match        https://bug.leaderinfo.com/mantisbt/bug_report_page.php*
+// @match        https://bug.leaderinfo.com/mantisbt/bug_report.php*
 // @icon         https://bug.leaderinfo.com/mantisbt/images/favicon.ico
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -180,6 +182,36 @@
       background-color: #c44949 !important;
       border-color: #c44949;
     }
+
+    .mu_report-form-backup_banner {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      z-index: 1000000;
+      background: rgb(22, 22, 31);
+      color: rgb(240, 240, 242);
+      border: 1px solid rgb(85, 143, 241);
+      border-radius: 6px;
+      padding: 12px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, .35);
+      max-width: 420px;
+      font-size: 14px;
+    }
+
+    .mu_report-form-backup_banner-title {
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .mu_report-form-backup_banner-text {
+      margin-bottom: 10px;
+    }
+
+    .mu_report-form-backup_banner button {
+      color: black;
+      cursor: pointer;
+      margin-right: 8px;
+    }
     `;
 
   const stylesElement = document.createElement('style');
@@ -263,6 +295,11 @@
       initializeModules();
     }, GM_getValue('mu.image_video_preview')));
 
+    panel.appendChild(createSwitch('Sauvegarde formulaire rapport', (v) => {
+      GM_setValue('mu.report_form_backup', v);
+      initializeModules();
+    }, GM_getValue('mu.report_form_backup')));
+
     const changeStateInput = document.createElement('input');
     changeStateInput.placeholder = 'ex: \'Attente validation interne\'';
     changeStateInput.style = GM_getValue('mu.change_state_input') ? '' : 'display: none';
@@ -328,6 +365,14 @@
       }
     }
 
+    if (GM_getValue('mu.report_form_backup')) {
+      try {
+        initReportFormBackup();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
     if (GM_getValue('mu.change_state_input') && GM_getValue('mu.change_state_input.value')) {
       try {
         initChangeStateInput();
@@ -347,6 +392,10 @@
 
   function initPrivateNote() {
     const privateCheckbox = document.getElementById('bugnote_add_view_status');
+    if (!privateCheckbox) {
+      return;
+    }
+
     if (!privateCheckbox.checked) {
       privateCheckbox.click();
     }
@@ -472,6 +521,10 @@
 
   function initCopyMantis() {
     const mantisHeader = document.querySelector('.widget-header');
+    if (!mantisHeader || !document.querySelector('td.bug-id')) {
+      return;
+    }
+
     mantisHeader.classList.add('mu_copy-mantis_header');
 
     const copyButtonElement = document.createElement('a');
@@ -779,6 +832,9 @@
 
   function initChangeStateInput() {
     const selectElement = document.querySelector('select[name=new_status]');
+    if (!selectElement) {
+      return;
+    }
 
     const options = [...selectElement.querySelectorAll('option')];
 
@@ -795,7 +851,11 @@
 
   function initNoTimmiSpecified() {
     const timmiCategoryElement = [...document.querySelectorAll('tr>.bug-custom-field.category')].find(f => f.textContent === 'Rubrique Timmi')?.parentElement.querySelector('.bug-custom-field:not(.category)');
-    const timmiCategory = timmiCategoryElement?.textContent;
+    if (!timmiCategoryElement) {
+      return;
+    }
+
+    const timmiCategory = timmiCategoryElement.textContent;
     if (timmiCategory === '') {
       timmiCategoryElement.classList.add('mu_no-timmi-specified_category');
 
@@ -817,6 +877,270 @@
     }
   }
 
+
+  function initReportFormBackup() {
+    const STORAGE_KEY = 'mu.report_form_backup.data';
+    const STORAGE_TS_KEY = 'mu.report_form_backup.timestamp';
+    const STORAGE_URL_KEY = 'mu.report_form_backup.url';
+    const RESTORE_PENDING_KEY = 'mu.report_form_backup.restore_pending';
+
+    const isReportPage = location.pathname.endsWith('/bug_report_page.php');
+    const isReportSubmitPage = location.pathname.endsWith('/bug_report.php');
+
+    function getReportForm() {
+      return document.querySelector('form[action*="bug_report.php"]');
+    }
+
+    function isRestorableField(field) {
+      if (!field.name || field.disabled) {
+        return false;
+      }
+
+      if (field.type === 'file') {
+        return false;
+      }
+
+      if (['submit', 'button', 'reset', 'image'].includes(field.type)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    function serializeForm(form) {
+      const data = {};
+
+      [...form.elements].forEach(field => {
+        if (!isRestorableField(field)) {
+          return;
+        }
+
+        if (field.type === 'checkbox') {
+          data[field.name] ??= [];
+          if (field.checked) {
+            data[field.name].push(field.value);
+          }
+          return;
+        }
+
+        if (field.type === 'radio') {
+          if (field.checked) {
+            data[field.name] = field.value;
+          }
+          return;
+        }
+
+        if (field.tagName === 'SELECT' && field.multiple) {
+          data[field.name] = [...field.selectedOptions].map(o => o.value);
+          return;
+        }
+
+        data[field.name] = field.value;
+      });
+
+      return data;
+    }
+
+    function restoreForm(form, data) {
+      if (!data || typeof data !== 'object') {
+        return;
+      }
+
+      [...form.elements].forEach(field => {
+        if (!isRestorableField(field) || !(field.name in data)) {
+          return;
+        }
+
+        const value = data[field.name];
+
+        if (field.type === 'checkbox') {
+          field.checked = Array.isArray(value) && value.includes(field.value);
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return;
+        }
+
+        if (field.type === 'radio') {
+          field.checked = value === field.value;
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return;
+        }
+
+        if (field.tagName === 'SELECT' && field.multiple) {
+          [...field.options].forEach(option => {
+            option.selected = Array.isArray(value) && value.includes(option.value);
+          });
+          field.dispatchEvent(new Event('change', { bubbles: true }));
+          return;
+        }
+
+        field.value = value;
+        field.dispatchEvent(new Event('input', { bubbles: true }));
+        field.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    }
+
+    function saveCurrentForm() {
+      const form = getReportForm();
+      if (!form) {
+        return;
+      }
+
+      GM_setValue(STORAGE_KEY, serializeForm(form));
+      GM_setValue(STORAGE_TS_KEY, Date.now());
+      GM_setValue(STORAGE_URL_KEY, location.href);
+    }
+
+    function clearBackup() {
+      GM_deleteValue(STORAGE_KEY);
+      GM_deleteValue(STORAGE_TS_KEY);
+      GM_deleteValue(STORAGE_URL_KEY);
+      GM_deleteValue(RESTORE_PENDING_KEY);
+    }
+
+    function getBackup() {
+      const data = GM_getValue(STORAGE_KEY);
+      if (!data || typeof data !== 'object' || Object.keys(data).length === 0) {
+        return null;
+      }
+      return data;
+    }
+
+    function getBackupTitle(backup) {
+      if (!backup || typeof backup !== 'object') {
+        return 'Sans titre';
+      }
+
+      const summaryKey = Object.keys(backup).find(k => k.toLowerCase() === 'summary')
+        ?? Object.keys(backup).find(k => k.toLowerCase().includes('summary'));
+      const summary = summaryKey ? backup[summaryKey] : '';
+
+      if (typeof summary === 'string' && summary.trim()) {
+        return summary.trim();
+      }
+
+      return 'Sans titre';
+    }
+
+    function goToReportPage() {
+      location.href = GM_getValue(STORAGE_URL_KEY) || new URL('bug_report_page.php', location.href).href;
+    }
+
+    function addRestoreBanner() {
+      const backup = getBackup();
+      if (!backup || document.getElementById('mu-report-form-backup-banner')) {
+        return;
+      }
+
+      const banner = document.createElement('div');
+      banner.id = 'mu-report-form-backup-banner';
+      banner.classList.add('mu_report-form-backup_banner');
+
+      const timestamp = GM_getValue(STORAGE_TS_KEY);
+      const dateText = timestamp ? new Date(timestamp).toLocaleString() : 'date inconnue';
+      const reportTitle = getBackupTitle(backup);
+
+      const closeButton = document.createElement('button');
+      closeButton.type = 'button';
+      closeButton.textContent = '✖';
+      closeButton.title = 'Fermer sans supprimer le brouillon';
+      closeButton.style = 'position: absolute; top: 6px; right: 6px; margin: 0;';
+      closeButton.addEventListener('click', function() {
+        banner.remove();
+      });
+
+      const title = document.createElement('div');
+      title.classList.add('mu_report-form-backup_banner-title');
+      title.style.paddingRight = '24px';
+      title.textContent = '🛟 Brouillon Mantis sauvegardé';
+
+      const text = document.createElement('div');
+      text.classList.add('mu_report-form-backup_banner-text');
+      text.textContent = `« ${reportTitle} » — sauvegardé le ${dateText}.`;
+
+      const restoreButton = document.createElement('button');
+      restoreButton.type = 'button';
+      restoreButton.textContent = 'Restaurer';
+      restoreButton.addEventListener('click', function() {
+        const form = getReportForm();
+        if (!form) {
+          GM_setValue(RESTORE_PENDING_KEY, true);
+          goToReportPage();
+          return;
+        }
+
+        restoreForm(form, backup);
+        GM_deleteValue(RESTORE_PENDING_KEY);
+        banner.remove();
+      });
+
+      const backButton = document.createElement('button');
+      backButton.type = 'button';
+      backButton.textContent = 'Retour au formulaire';
+      backButton.title = 'Retourner au formulaire sans restaurer automatiquement';
+      backButton.addEventListener('click', goToReportPage);
+
+      const discardButton = document.createElement('button');
+      discardButton.type = 'button';
+      discardButton.textContent = 'Supprimer';
+      discardButton.addEventListener('click', function() {
+        clearBackup();
+        banner.remove();
+      });
+
+      banner.appendChild(closeButton);
+      banner.appendChild(title);
+      banner.appendChild(text);
+      banner.appendChild(restoreButton);
+      if (!isReportPage) {
+        banner.appendChild(backButton);
+      }
+      banner.appendChild(discardButton);
+
+      document.body.appendChild(banner);
+
+      destroySequence.push(() => {
+        banner.remove();
+      });
+    }
+
+    if (isReportPage) {
+      const form = getReportForm();
+      if (!form) {
+        return;
+      }
+
+      const backup = getBackup();
+      const shouldRestore = GM_getValue(RESTORE_PENDING_KEY);
+
+      // Never restore just because a draft exists. Restore only after the user clicked
+      // "Restaurer" from bug_report.php, or directly clicks "Restaurer" on this page.
+      if (backup && shouldRestore) {
+        restoreForm(form, backup);
+        GM_deleteValue(RESTORE_PENDING_KEY);
+      }
+
+      if (backup) {
+        addRestoreBanner();
+      }
+
+      const saveHandler = () => saveCurrentForm();
+
+      form.addEventListener('input', saveHandler);
+      form.addEventListener('change', saveHandler);
+      form.addEventListener('submit', saveCurrentForm);
+
+      destroySequence.push(() => {
+        form.removeEventListener('input', saveHandler);
+        form.removeEventListener('change', saveHandler);
+        form.removeEventListener('submit', saveCurrentForm);
+      });
+    }
+
+    if (isReportSubmitPage) {
+      addRestoreBanner();
+    }
+  }
+
   function blobToBase64(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -833,6 +1157,7 @@
   if (!GM_getValue('mu.FIRST_INSTALL')) {
     GM_setValue('mu.copy_note', true);
     GM_setValue('mu.image_video_preview', true);
+    GM_setValue('mu.report_form_backup', true);
 
     GM_setValue('mu.FIRST_INSTALL', true);
   }
