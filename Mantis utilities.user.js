@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mantis utilities
 // @namespace    https://bug.leaderinfo.com/mantisbt
-// @version      2026-06-12
+// @version      2026-06-12_15-09
 // @description  Liste d'utilitaires pour améliorer l'utilisation de mantis
 // @author       lhubert
 // @downloadURL  https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
@@ -948,20 +948,20 @@
 
     function parseUserLabel(label) {
       const text = label.trim().replace(/\s+/g, ' ');
-      const match = text.match(/^(.+?)\s*\(([^()@\s]+)\)$/);
+      const match = text.match(/^(.+?)\s*\(@?([^()\s]+)\)$/);
       if (match) {
         return { username: match[2], realName: match[1] };
       }
-      return { username: text, realName: '' };
+      return { username: text.replace(/^@+/, ''), realName: '' };
     }
 
     function getUsers() {
       const usersByUsername = new Map();
 
       function addUser(username, realName = '') {
-        username = username.trim();
+        username = username.trim().replace(/^@+/, '');
         realName = realName.trim();
-        if (!username || username === 'Aucune') {
+        if (!username || username === 'Aucune' || username.startsWith('[')) {
           return;
         }
 
