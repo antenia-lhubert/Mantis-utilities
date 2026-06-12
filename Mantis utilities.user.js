@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Mantis utilities
 // @namespace    https://bug.leaderinfo.com/mantisbt
-// @version      2026-06-10
+// @version      2025-06-12
 // @description  Liste d'utilitaires pour améliorer l'utilisation de mantis
 // @author       lhubert
 // @downloadURL  https://github.com/antenia-lhubert/Mantis-utilities/raw/refs/heads/main/Mantis%20utilities.user.js
@@ -212,6 +212,45 @@
       cursor: pointer;
       margin-right: 8px;
     }
+
+    .mu_username-autocomplete_popup {
+      position: absolute;
+      z-index: 1000001;
+      min-width: 220px;
+      max-width: min(420px, calc(100vw - 20px));
+      max-height: 260px;
+      overflow-y: auto;
+      background: #fff;
+      color: #333;
+      border: 1px solid #558ff1;
+      border-radius: 4px;
+      box-shadow: 0 4px 15px rgba(0, 0, 0, .25);
+      padding: 4px 0;
+      font-size: 13px;
+    }
+
+    .mu_username-autocomplete_item {
+      padding: 6px 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .mu_username-autocomplete_item:hover,
+    .mu_username-autocomplete_item-active {
+      background: rgb(85, 143, 241);
+      color: #fff;
+    }
+
+    .mu_username-autocomplete_username {
+      font-weight: bold;
+    }
+
+    .mu_username-autocomplete_realname {
+      font-size: .9em;
+      opacity: .85;
+    }
     `;
 
   const stylesElement = document.createElement('style');
@@ -300,6 +339,11 @@
       initializeModules();
     }, GM_getValue('mu.report_form_backup')));
 
+    panel.appendChild(createSwitch('Auto-complétion @utilisateur', (v) => {
+      GM_setValue('mu.username_autocomplete', v);
+      initializeModules();
+    }, GM_getValue('mu.username_autocomplete')));
+
     const changeStateInput = document.createElement('input');
     changeStateInput.placeholder = 'ex: \'Attente validation interne\'';
     changeStateInput.style = GM_getValue('mu.change_state_input') ? '' : 'display: none';
@@ -368,6 +412,14 @@
     if (GM_getValue('mu.report_form_backup')) {
       try {
         initReportFormBackup();
+      } catch (e) {
+        console.error(e);
+      }
+    }
+
+    if (GM_getValue('mu.username_autocomplete')) {
+      try {
+        initUsernameAutocomplete();
       } catch (e) {
         console.error(e);
       }
@@ -878,6 +930,395 @@
   }
 
 
+  function initUsernameAutocomplete() {
+    const MAX_RESULTS = 8;
+    const TARGET_SELECTOR = 'textarea, input[type="text"]:not(.nav-search-input), input[type="search"]';
+    let popupElement = null;
+    let activeInput = null;
+    let activeMention = null;
+    let activeIndex = 0;
+    let activeResults = [];
+
+    function normalizeText(value) {
+      return String(value ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    }
+
+    function parseUserLabel(label) {
+      const text = label.trim().replace(/\s+/g, ' ');
+      const match = text.match(/^(.+?)\s*\(([^()@\s]+)\)$/);
+      if (match) {
+        return { username: match[2], realName: match[1] };
+      }
+      return { username: text, realName: '' };
+    }
+
+    function getUsers() {
+      const usersByUsername = new Map();
+
+      function addUser(username, realName = '') {
+        username = username.trim();
+        realName = realName.trim();
+        if (!username || username === 'Aucune') {
+          return;
+        }
+
+        const key = normalizeText(username);
+        const existing = usersByUsername.get(key);
+        if (!existing || (!existing.realName && realName)) {
+          usersByUsername.set(key, { username, realName });
+        }
+      }
+
+      [...document.querySelectorAll('select[name="handler_id"] option, select[name="user_id"] option, select[name="reporter_id"] option, select[name="monitor_user_id"] option')].forEach(option => {
+        const parsed = parseUserLabel(option.textContent || '');
+        addUser(parsed.username, parsed.realName);
+      });
+
+      [...document.querySelectorAll('a[href*="view_user_page.php?id="]')].forEach(link => {
+        const parsed = parseUserLabel(link.textContent || '');
+        addUser(parsed.username, parsed.realName);
+      });
+
+      const currentUsername = document.querySelector('.user-info')?.textContent?.trim();
+      if (currentUsername) {
+        addUser(currentUsername);
+      }
+
+      return [...usersByUsername.values()].sort((a, b) => a.username.localeCompare(b.username));
+    }
+
+    const users = getUsers();
+    if (users.length === 0) {
+      return;
+    }
+
+    function fuzzyScore(candidate, query) {
+      const q = normalizeText(query).trim();
+      if (!q) {
+        return 0;
+      }
+
+      const username = normalizeText(candidate.username);
+      const realName = normalizeText(candidate.realName);
+      const haystack = `${username} ${realName}`.trim();
+      const tokens = haystack.split(/[^a-z0-9]+/).filter(Boolean);
+
+      if (username === q) {
+        return -20;
+      }
+      if (username.startsWith(q)) {
+        return -10 + username.length - q.length;
+      }
+      if (tokens.some(token => token.startsWith(q))) {
+        return -5;
+      }
+      if (haystack.includes(q)) {
+        return 5 + haystack.indexOf(q);
+      }
+
+      let pos = -1;
+      let gaps = 0;
+      for (const char of q) {
+        const nextPos = haystack.indexOf(char, pos + 1);
+        if (nextPos === -1) {
+          return Infinity;
+        }
+        if (pos !== -1) {
+          gaps += nextPos - pos - 1;
+        }
+        pos = nextPos;
+      }
+
+      return 20 + gaps + haystack.length * 0.01;
+    }
+
+    function searchUsers(query) {
+      return users
+        .map(user => ({ user, score: fuzzyScore(user, query) }))
+        .filter(result => Number.isFinite(result.score))
+        .sort((a, b) => a.score - b.score || a.user.username.localeCompare(b.user.username))
+        .slice(0, MAX_RESULTS)
+        .map(result => result.user);
+    }
+
+    function isUsernameInput(input) {
+      const name = input.getAttribute('name') || '';
+      const id = input.id || '';
+      const autocomplete = input.getAttribute('autocomplete') || '';
+      const ariaLabel = input.getAttribute('aria-label') || '';
+      const placeholder = input.getAttribute('placeholder') || '';
+      const haystack = `${name} ${id} ${autocomplete} ${ariaLabel} ${placeholder}`.toLowerCase();
+
+      return input.tagName !== 'TEXTAREA' && (
+        id === 'bug_monitor_list_user_to_add'
+        || name === 'user_to_add'
+        || haystack.includes('username')
+        || haystack.includes('user_to_add')
+        || haystack.includes('monitor_user')
+      );
+    }
+
+    function findAutocompleteQuery(input) {
+      const cursor = input.selectionStart;
+      if (cursor === null || cursor !== input.selectionEnd) {
+        return null;
+      }
+
+      if (isUsernameInput(input)) {
+        const value = input.value;
+        // Username fields expect a single username, so autocomplete the whole value
+        // without requiring or inserting an '@'.
+        if (!value.trim() || /[\s,;:!?<>()[\]{}]/.test(value)) {
+          return null;
+        }
+
+        return {
+          start: 0,
+          end: value.length,
+          query: value,
+          prefix: '',
+          suffix: ''
+        };
+      }
+
+      const textBeforeCursor = input.value.slice(0, cursor);
+      const match = textBeforeCursor.match(/(^|[\s([{>])@([^@\r\n]{0,40})$/);
+      if (!match) {
+        return null;
+      }
+
+      const query = match[2];
+      if (/^[\s]/.test(query) || /[,;:!?<>()[\]{}]/.test(query)) {
+        return null;
+      }
+
+      return {
+        start: cursor - query.length - 1,
+        end: cursor,
+        query,
+        prefix: '@',
+        suffix: ' '
+      };
+    }
+
+    function getCaretPosition(input) {
+      const rect = input.getBoundingClientRect();
+      const computed = window.getComputedStyle(input);
+      const cursor = input.selectionStart ?? 0;
+      const marker = document.createElement('span');
+      const mirror = document.createElement('div');
+      const propertiesToCopy = [
+        'boxSizing', 'width', 'height', 'fontFamily', 'fontSize', 'fontWeight', 'fontStyle',
+        'letterSpacing', 'textTransform', 'wordSpacing', 'textIndent', 'lineHeight',
+        'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+        'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth'
+      ];
+
+      propertiesToCopy.forEach(property => {
+        mirror.style[property] = computed[property];
+      });
+
+      mirror.style.position = 'absolute';
+      mirror.style.visibility = 'hidden';
+      mirror.style.left = `${window.scrollX + rect.left}px`;
+      mirror.style.top = `${window.scrollY + rect.top}px`;
+      mirror.style.overflow = 'hidden';
+      mirror.style.whiteSpace = input.tagName === 'TEXTAREA' ? 'pre-wrap' : 'pre';
+      mirror.style.wordWrap = input.tagName === 'TEXTAREA' ? 'break-word' : 'normal';
+
+      // A trailing newline would otherwise collapse in the mirror and place the marker
+      // on the previous line instead of the current empty line.
+      mirror.textContent = input.value.slice(0, cursor).replace(/\n$/g, '\n\u200b');
+      marker.textContent = '\u200b';
+      mirror.appendChild(marker);
+      document.body.appendChild(mirror);
+
+      const markerRect = marker.getBoundingClientRect();
+      const lineHeight = parseFloat(computed.lineHeight) || parseFloat(computed.fontSize) * 1.2 || 16;
+      const position = {
+        left: window.scrollX + markerRect.left - input.scrollLeft,
+        top: window.scrollY + markerRect.top - input.scrollTop + lineHeight + 4
+      };
+
+      mirror.remove();
+      return position;
+    }
+
+    function positionPopup(input) {
+      if (!popupElement) {
+        return;
+      }
+
+      const rect = input.getBoundingClientRect();
+      const popupWidth = Math.max(220, Math.min(rect.width, 420));
+      const caretPosition = getCaretPosition(input);
+      const maxLeft = window.scrollX + document.documentElement.clientWidth - popupWidth - 10;
+      const left = Math.max(window.scrollX + 10, Math.min(caretPosition.left, maxLeft));
+
+      popupElement.style.top = `${caretPosition.top}px`;
+      popupElement.style.left = `${left}px`;
+      popupElement.style.width = `${popupWidth}px`;
+    }
+
+    function closePopup() {
+      popupElement?.remove();
+      popupElement = null;
+      activeInput = null;
+      activeMention = null;
+      activeResults = [];
+      activeIndex = 0;
+    }
+
+    function renderPopup(input, mention, results) {
+      closePopup();
+      if (results.length === 0) {
+        return;
+      }
+
+      activeInput = input;
+      activeMention = mention;
+      activeResults = results;
+      activeIndex = 0;
+
+      popupElement = document.createElement('div');
+      popupElement.classList.add('mu_username-autocomplete_popup');
+
+      results.forEach((user, index) => {
+        const item = document.createElement('div');
+        item.classList.add('mu_username-autocomplete_item');
+        if (index === activeIndex) {
+          item.classList.add('mu_username-autocomplete_item-active');
+        }
+
+        const username = document.createElement('span');
+        username.classList.add('mu_username-autocomplete_username');
+        username.textContent = `${mention.prefix}${user.username}`;
+        item.appendChild(username);
+
+        if (user.realName) {
+          const realName = document.createElement('span');
+          realName.classList.add('mu_username-autocomplete_realname');
+          realName.textContent = user.realName;
+          item.appendChild(realName);
+        }
+
+        item.addEventListener('mousedown', function(e) {
+          e.preventDefault();
+          selectUser(index);
+        });
+
+        popupElement.appendChild(item);
+      });
+
+      document.body.appendChild(popupElement);
+      positionPopup(input);
+    }
+
+    function refreshActiveItem() {
+      if (!popupElement) {
+        return;
+      }
+      [...popupElement.querySelectorAll('.mu_username-autocomplete_item')].forEach((item, index) => {
+        item.classList.toggle('mu_username-autocomplete_item-active', index === activeIndex);
+      });
+      popupElement.querySelector('.mu_username-autocomplete_item-active')?.scrollIntoView({ block: 'nearest' });
+    }
+
+    function selectUser(index = activeIndex) {
+      if (!activeInput || !activeMention || !activeResults[index]) {
+        return;
+      }
+
+      const user = activeResults[index];
+      const before = activeInput.value.slice(0, activeMention.start);
+      const after = activeInput.value.slice(activeMention.end);
+      const insertion = `${activeMention.prefix}${user.username}${activeMention.suffix}`;
+      const cursor = before.length + insertion.length;
+
+      activeInput.value = `${before}${insertion}${after}`;
+      activeInput.setSelectionRange(cursor, cursor);
+      activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+      closePopup();
+    }
+
+    function update(input) {
+      const mention = findAutocompleteQuery(input);
+      if (!mention) {
+        closePopup();
+        return;
+      }
+
+      const results = searchUsers(mention.query);
+      renderPopup(input, mention, results);
+    }
+
+    function onInput(e) {
+      update(e.target);
+    }
+
+    function onKeyDown(e) {
+      if (!popupElement || e.target !== activeInput) {
+        return;
+      }
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        activeIndex = (activeIndex + 1) % activeResults.length;
+        refreshActiveItem();
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        activeIndex = (activeIndex - 1 + activeResults.length) % activeResults.length;
+        refreshActiveItem();
+      } else if (e.key === 'Enter') {
+        e.preventDefault();
+        selectUser();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        closePopup();
+      }
+    }
+
+    function onBlur() {
+      setTimeout(closePopup, 150);
+    }
+
+    function onScrollOrResize() {
+      if (activeInput) {
+        positionPopup(activeInput);
+      }
+    }
+
+    const inputs = [...document.querySelectorAll(TARGET_SELECTOR)]
+      .filter(input => !input.readOnly && !input.disabled);
+
+    inputs.forEach(input => {
+      input.setAttribute('autocomplete', 'off');
+      input.addEventListener('input', onInput);
+      input.addEventListener('keydown', onKeyDown);
+      input.addEventListener('blur', onBlur);
+      input.addEventListener('click', onInput);
+    });
+
+    window.addEventListener('scroll', onScrollOrResize, true);
+    window.addEventListener('resize', onScrollOrResize);
+
+    destroySequence.push(() => {
+      closePopup();
+      inputs.forEach(input => {
+        input.removeEventListener('input', onInput);
+        input.removeEventListener('keydown', onKeyDown);
+        input.removeEventListener('blur', onBlur);
+        input.removeEventListener('click', onInput);
+      });
+      window.removeEventListener('scroll', onScrollOrResize, true);
+      window.removeEventListener('resize', onScrollOrResize);
+    });
+  }
+
+
   function initReportFormBackup() {
     const STORAGE_KEY = 'mu.report_form_backup.data';
     const STORAGE_TS_KEY = 'mu.report_form_backup.timestamp';
@@ -1154,12 +1595,17 @@
     });
   }
 
-  if (!GM_getValue('mu.FIRST_INSTALL')) {
+  if (GM_getValue('mu.copy_note') === undefined) {
     GM_setValue('mu.copy_note', true);
+  }
+  if (GM_getValue('mu.image_video_preview') === undefined) {
     GM_setValue('mu.image_video_preview', true);
+  }
+  if (GM_getValue('mu.report_form_backup') === undefined) {
     GM_setValue('mu.report_form_backup', true);
-
-    GM_setValue('mu.FIRST_INSTALL', true);
+  }
+  if (GM_getValue('mu.username_autocomplete') === undefined) {
+    GM_setValue('mu.username_autocomplete', true);
   }
 
   initializeModules();
